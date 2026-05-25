@@ -21,6 +21,7 @@ RUN pip install --upgrade pip && \
       torchaudio==2.5.1 && \
     pip install \
       coqui-tts \
+      "transformers>=4.46,<4.50" \
       fastapi==0.115.0 \
       "uvicorn[standard]==0.32.0" \
       numpy==1.26.4
