@@ -1,0 +1,9 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.DS_Store
+*.wav
+*.mp3
+README.md
