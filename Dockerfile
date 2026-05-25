@@ -17,7 +17,7 @@ WORKDIR /app
 
 RUN pip install --upgrade pip && \
     pip install \
-      TTS==0.22.0 \
+      coqui-tts \
       fastapi==0.115.0 \
       "uvicorn[standard]==0.32.0" \
       numpy==1.26.4
