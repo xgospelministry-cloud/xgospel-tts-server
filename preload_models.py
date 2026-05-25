@@ -9,9 +9,10 @@ MODELS = [
     "tts_models/tw_asante/openbible/vits",
     "tts_models/ewe/openbible/vits",
     "tts_models/yor/openbible/vits",
-    "tts_models/ig/fairseq/vits",
     "tts_models/hau/openbible/vits",
 ]
+# Igbo (tts_models/ig/fairseq/vits) temporarily disabled — Facebook MMS
+# tarball download fails (ISO code mismatch: coqui uses "ig", FB uses "ibo").
 
 for model_name in MODELS:
     print(f"==> Downloading {model_name}")

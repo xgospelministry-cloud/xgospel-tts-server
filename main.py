@@ -22,7 +22,6 @@ MODELS = {
     "asante-twi": "tts_models/tw_asante/openbible/vits",
     "ewe":        "tts_models/ewe/openbible/vits",
     "yoruba":     "tts_models/yor/openbible/vits",
-    "igbo":       "tts_models/ig/fairseq/vits",
     "hausa":      "tts_models/hau/openbible/vits",
 }
 
@@ -30,7 +29,6 @@ QUALITY = {
     "asante-twi": "high",
     "ewe":        "high",
     "yoruba":     "high",
-    "igbo":       "preview",
     "hausa":      "medium",
 }
 
