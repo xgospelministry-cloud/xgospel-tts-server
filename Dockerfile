@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 RUN pip install --upgrade pip && \
+    pip install --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.5.1 \
+      torchaudio==2.5.1 && \
     pip install \
       coqui-tts \
       fastapi==0.115.0 \
