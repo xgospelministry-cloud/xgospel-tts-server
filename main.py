@@ -4,11 +4,15 @@ Endpoints:
   GET  /healthz   -> liveness + loaded model list
   POST /tts       -> { language, text } -> audio/mpeg stream
 
-All 4 VITS models are loaded into memory at startup (~3-4GB RAM total),
-so /tts requests have no cold-start cost.
+Loads 5 VITS models into memory at startup (~5 GB RAM total) so /tts
+requests have no cold-start cost. Two loader paths:
+  • Coqui registry (TTS.api.TTS) — Twi / Ewe / Yoruba / Hausa
+  • Direct Synthesizer + HF Hub weights — Igbo (community-trained model,
+    multispeaker; Facebook MMS doesn't ship an Igbo TTS and BibleTTS
+    never released one either)
 
 Behaviour:
-- Synthesise at the model's native sample rate (48 kHz for BibleTTS VITS).
+- Synthesise at the model's native sample rate.
 - Encode to MP3 96 kbps mono via ffmpeg piped through stdin/stdout.
 - Persist the MP3 to /srv/audio/v1/{lang}/{hash}.mp3 so audio.xgospel.net
   can serve subsequent identical requests as a static file. The hash is
@@ -26,9 +30,13 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import Response
+from huggingface_hub import hf_hub_download
 from pydantic import BaseModel, Field
 from TTS.api import TTS
+from TTS.tts.utils.speakers import SpeakerManager
+from TTS.utils.synthesizer import Synthesizer
 
+# Coqui-distributed BibleTTS models — single-speaker, loaded via TTS.api.TTS.
 MODELS = {
     "asante-twi": "tts_models/tw_asante/openbible/vits",
     "ewe":        "tts_models/ewe/openbible/vits",
@@ -36,11 +44,15 @@ MODELS = {
     "hausa":      "tts_models/hau/openbible/vits",
 }
 
+# Community Igbo model — multispeaker, loaded via Synthesizer from HF Hub.
+IGBO_HF_REPO = "multilingual-tts/VITS-OpenBible-Igbo"
+
 QUALITY = {
     "asante-twi": "high",
     "ewe":        "high",
     "yoruba":     "high",
     "hausa":      "medium",
+    "igbo":       "high",
 }
 
 API_KEY = os.environ.get("API_KEY")
@@ -52,14 +64,74 @@ AUDIO_DIR = Path("/srv/audio")
 MP3_BITRATE = "96k"
 
 app = FastAPI(title="XGospel BibleTTS")
-loaded: dict[str, TTS] = {}
+
+
+class TtsBackend:
+    """Uniform wrapper so the /tts handler doesn't care which loader path
+    produced a given language. Hides the API difference between Coqui's
+    `TTS.api.TTS` (single-speaker, sample rate via `.synthesizer.output_sample_rate`)
+    and the lower-level `Synthesizer` (multispeaker, needs `speaker_name`,
+    sample rate via `.output_sample_rate`)."""
+
+    def __init__(self, kind: str, obj, speaker: str | None = None):
+        self.kind = kind  # "tts_api" | "synthesizer"
+        self.obj = obj
+        self.speaker = speaker
+
+    def synthesize(self, text: str):
+        """Return `(waveform_iterable, sample_rate_hz)`."""
+        if self.kind == "tts_api":
+            sr = self.obj.synthesizer.output_sample_rate
+            wav = self.obj.tts(text=text)
+        else:  # synthesizer
+            sr = self.obj.output_sample_rate
+            wav = self.obj.tts(
+                text=text,
+                speaker_name=self.speaker,
+                split_sentences=False,
+            )
+        return wav, sr
+
+
+loaded: dict[str, TtsBackend] = {}
+
+
+def _load_igbo() -> TtsBackend:
+    """Pull the community Igbo VITS model from HF (cache is pre-warmed at
+    `docker build` time by preload_models.py — these calls just resolve
+    to local paths) and construct a Synthesizer + SpeakerManager. Picks
+    the first speaker alphabetically as the default voice; logged at
+    startup so we can swap to a different speaker later by replacing
+    the default constant if quality differs across speakers."""
+    ckpt = hf_hub_download(IGBO_HF_REPO, "model_last.pth")
+    config = hf_hub_download(IGBO_HF_REPO, "config.json")
+    speakers = hf_hub_download(IGBO_HF_REPO, "speakers.pth")
+    synth = Synthesizer(
+        tts_checkpoint=ckpt,
+        tts_config_path=config,
+        tts_speakers_file=speakers,
+        use_cuda=False,
+    )
+    if synth.tts_model.speaker_manager is None:
+        synth.tts_model.speaker_manager = SpeakerManager(
+            speaker_id_file_path=speakers,
+        )
+    names = sorted(synth.tts_model.speaker_manager.speaker_names)
+    print(f"Igbo speakers available ({len(names)}): {names}")
+    if not names:
+        raise RuntimeError("Igbo model loaded but no speaker IDs were found")
+    default_speaker = names[0]
+    print(f"Igbo default speaker → {default_speaker}")
+    return TtsBackend("synthesizer", synth, speaker=default_speaker)
 
 
 @app.on_event("startup")
 def load_models() -> None:
     for lang, model_name in MODELS.items():
         print(f"Loading {lang}: {model_name}")
-        loaded[lang] = TTS(model_name=model_name, progress_bar=False)
+        loaded[lang] = TtsBackend("tts_api", TTS(model_name=model_name, progress_bar=False))
+    print("Loading igbo: " + IGBO_HF_REPO)
+    loaded["igbo"] = _load_igbo()
     print(f"Loaded {len(loaded)} models.")
     try:
         AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,7 +141,7 @@ def load_models() -> None:
 
 
 class TTSRequest(BaseModel):
-    language: str = Field(..., description="asante-twi | ewe | yoruba | hausa")
+    language: str = Field(..., description="asante-twi | ewe | yoruba | igbo | hausa")
     text: str = Field(..., min_length=1, max_length=MAX_CHARS)
 
 
@@ -163,9 +235,8 @@ def synthesize(req: TTSRequest, x_api_key: str | None = Header(default=None)):
             headers={"X-Quality": QUALITY[lang], "X-Cache": "disk"},
         )
 
-    tts = loaded[lang]
-    sample_rate = tts.synthesizer.output_sample_rate
-    waveform = tts.tts(text=text)
+    backend = loaded[lang]
+    waveform, sample_rate = backend.synthesize(text)
 
     audio = np.array(waveform, dtype=np.float32)
     pcm = (audio * 32767).clip(-32768, 32767).astype(np.int16)
